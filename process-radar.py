@@ -87,11 +87,12 @@ def get_latest_radar_file(site):
             
             print(f"Checking S3 for {site} at {check_time.strftime('%Y-%m-%d %H:%M')}...")
             
-            # List objects in the bucket
+            # List objects in the bucket (requester-pays)
             response = s3.list_objects_v2(
                 Bucket=BUCKET_NAME,
                 Prefix=prefix,
-                MaxKeys=100
+                MaxKeys=100,
+                RequestPayer='requester'  # Required for requester-pays buckets
             )
             
             if 'Contents' not in response:
@@ -127,7 +128,12 @@ def download_radar_file(s3_key):
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
         
         print(f"Downloading {s3_key}...")
-        s3.download_file(BUCKET_NAME, s3_key, temp_file.name)
+        s3.download_file(
+            BUCKET_NAME, 
+            s3_key, 
+            temp_file.name,
+            ExtraArgs={'RequestPayer': 'requester'}  # Required for requester-pays
+        )
         
         print(f"Downloaded to {temp_file.name}")
         return temp_file.name
