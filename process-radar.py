@@ -11,11 +11,14 @@ import json
 import tempfile
 from datetime import datetime, timedelta
 import time
+import threading
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 import pyart
 import numpy as np
+from flask import Flask, send_from_directory, jsonify
+from flask_cors import CORS
 
 # Configuration
 RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
@@ -284,22 +287,70 @@ def process_all_radars():
     print(f"\n=== Processing Complete ===")
 
 def main():
-    """Main loop - process radar data continuously"""
+    """Main function - starts Flask server and radar processing thread"""
     print("NEXRAD Radar Processor Starting...")
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Processing interval: {LOOP_INTERVAL} seconds")
     print(f"Radar sites: {', '.join(RADAR_SITES)}")
     
-    while True:
-        try:
-            process_all_radars()
-        except Exception as e:
-            print(f"Error in processing loop: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        print(f"\nWaiting {LOOP_INTERVAL} seconds until next update...")
-        time.sleep(LOOP_INTERVAL)
+    # Create Flask app
+    app = Flask(__name__)
+    CORS(app)  # Enable CORS for cross-origin requests
+    
+    @app.route('/')
+    def index():
+        """Health check endpoint"""
+        status_file = os.path.join(OUTPUT_DIR, 'status.json')
+        if os.path.exists(status_file):
+            with open(status_file, 'r') as f:
+                status = json.load(f)
+            return jsonify({
+                'service': 'LancasterWX Radar Processor',
+                'status': 'running',
+                'last_updated': status.get('last_updated'),
+                'sites': status.get('sites'),
+                'files': [
+                    '/radar-klwx.geojson',
+                    '/radar-kdix.geojson',
+                    '/status.json'
+                ]
+            })
+        return jsonify({
+            'service': 'LancasterWX Radar Processor',
+            'status': 'starting',
+            'message': 'Waiting for first radar update...'
+        })
+    
+    @app.route('/<path:filename>')
+    def serve_file(filename):
+        """Serve GeoJSON and status files"""
+        return send_from_directory(OUTPUT_DIR, filename)
+    
+    # Start radar processing in background thread
+    def radar_loop():
+        """Background thread for radar processing"""
+        while True:
+            try:
+                process_all_radars()
+            except Exception as e:
+                print(f"Error in processing loop: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"\nWaiting {LOOP_INTERVAL} seconds until next update...")
+            time.sleep(LOOP_INTERVAL)
+    
+    # Start background thread
+    radar_thread = threading.Thread(target=radar_loop, daemon=True)
+    radar_thread.start()
+    print("Radar processing thread started")
+    
+    # Get port from environment (Railway sets this)
+    port = int(os.environ.get('PORT', 8080))
+    print(f"Starting web server on port {port}...")
+    
+    # Run Flask app
+    app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
     main()
