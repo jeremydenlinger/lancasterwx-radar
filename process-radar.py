@@ -20,6 +20,10 @@ import numpy as np
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
 
+# Force unbuffered output so we can see logs in real-time
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Configuration
 RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
 OUTPUT_DIR = '/app/public'  # Railway serves files from /app/public
@@ -353,11 +357,11 @@ def main():
     # Start background thread
     radar_thread = threading.Thread(target=radar_loop, daemon=True)
     radar_thread.start()
-    print("Radar processing thread started")
+    print("Radar processing thread started", flush=True)
     
     # Get port from environment (Railway sets this)
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting web server on port {port}...")
+    print(f"Starting web server on port {port}...", flush=True)
     
     # Run Flask app
     app.run(host='0.0.0.0', port=port)
