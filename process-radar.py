@@ -59,9 +59,21 @@ def get_color_from_dbz(dbz):
 def get_latest_radar_file(site):
     """Get the most recent radar file from AWS S3 for a given site"""
     try:
-        # Create S3 client with credentials from environment variables
-        # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set in Render
-        s3 = boto3.client('s3', region_name='us-east-1')
+        # Get AWS credentials from environment
+        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        
+        if not aws_access_key or not aws_secret_key:
+            print(f"ERROR: AWS credentials not found in environment!")
+            print(f"AWS_ACCESS_KEY_ID present: {bool(aws_access_key)}")
+            print(f"AWS_SECRET_ACCESS_KEY present: {bool(aws_secret_key)}")
+            return None
+        
+        # Create S3 client with explicit credentials
+        s3 = boto3.client('s3', 
+                         region_name='us-east-1',
+                         aws_access_key_id=aws_access_key,
+                         aws_secret_access_key=aws_secret_key)
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -103,7 +115,13 @@ def get_latest_radar_file(site):
 def download_radar_file(s3_key):
     """Download radar file from S3 to temp location"""
     try:
-        s3 = boto3.client('s3', region_name='us-east-1')
+        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        
+        s3 = boto3.client('s3', 
+                         region_name='us-east-1',
+                         aws_access_key_id=aws_access_key,
+                         aws_secret_access_key=aws_secret_key)
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
