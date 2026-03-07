@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 -u
 """
 NEXRAD Level 2 Radar Processor for LancasterWX.com
 Runs on Railway.app - Downloads and processes radar data from KLWX and KDIX
@@ -19,10 +19,6 @@ import pyart
 import numpy as np
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
-
-# Force unbuffered output so we can see logs in real-time
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
 
 # Configuration
 RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
@@ -64,9 +60,13 @@ def get_latest_radar_file(site):
     """Get the most recent radar file from AWS S3 for a given site"""
     try:
         # Create S3 client with no credentials (public bucket)
+        # Use us-east-1 region where the bucket is hosted
         s3 = boto3.client('s3', 
                          region_name='us-east-1',
-                         config=Config(signature_version=UNSIGNED))
+                         config=Config(
+                             signature_version=UNSIGNED,
+                             s3={'addressing_style': 'path'}
+                         ))
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -110,7 +110,10 @@ def download_radar_file(s3_key):
     try:
         s3 = boto3.client('s3', 
                          region_name='us-east-1',
-                         config=Config(signature_version=UNSIGNED))
+                         config=Config(
+                             signature_version=UNSIGNED,
+                             s3={'addressing_style': 'path'}
+                         ))
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
