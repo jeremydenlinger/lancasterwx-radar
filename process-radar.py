@@ -60,7 +60,9 @@ def get_latest_radar_file(site):
     """Get the most recent radar file from AWS S3 for a given site"""
     try:
         # Create S3 client with no credentials (public bucket)
-        s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+        s3 = boto3.client('s3', 
+                         region_name='us-east-1',
+                         config=Config(signature_version=UNSIGNED))
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -102,7 +104,9 @@ def get_latest_radar_file(site):
 def download_radar_file(s3_key):
     """Download radar file from S3 to temp location"""
     try:
-        s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+        s3 = boto3.client('s3', 
+                         region_name='us-east-1',
+                         config=Config(signature_version=UNSIGNED))
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
@@ -324,7 +328,13 @@ def main():
     @app.route('/<path:filename>')
     def serve_file(filename):
         """Serve GeoJSON and status files"""
-        return send_from_directory(OUTPUT_DIR, filename)
+        try:
+            return send_from_directory(OUTPUT_DIR, filename)
+        except FileNotFoundError:
+            return jsonify({
+                'error': 'File not found',
+                'message': f'{filename} does not exist yet. Radar data is still processing.'
+            }), 404
     
     # Start radar processing in background thread
     def radar_loop():
