@@ -59,14 +59,9 @@ def get_color_from_dbz(dbz):
 def get_latest_radar_file(site):
     """Get the most recent radar file from AWS S3 for a given site"""
     try:
-        # Create S3 client with no credentials (public bucket)
-        # Use us-east-1 region where the bucket is hosted
-        s3 = boto3.client('s3', 
-                         region_name='us-east-1',
-                         config=Config(
-                             signature_version=UNSIGNED,
-                             s3={'addressing_style': 'path'}
-                         ))
+        # Create S3 client with credentials from environment variables
+        # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set in Render
+        s3 = boto3.client('s3', region_name='us-east-1')
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -108,12 +103,7 @@ def get_latest_radar_file(site):
 def download_radar_file(s3_key):
     """Download radar file from S3 to temp location"""
     try:
-        s3 = boto3.client('s3', 
-                         region_name='us-east-1',
-                         config=Config(
-                             signature_version=UNSIGNED,
-                             s3={'addressing_style': 'path'}
-                         ))
+        s3 = boto3.client('s3', region_name='us-east-1')
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
