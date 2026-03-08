@@ -59,21 +59,11 @@ def get_color_from_dbz(dbz):
 def get_latest_radar_file(site):
     """Get the most recent radar file from AWS S3 for a given site"""
     try:
-        # Get AWS credentials from environment
-        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-        
-        if not aws_access_key or not aws_secret_key:
-            print(f"ERROR: AWS credentials not found in environment!")
-            print(f"AWS_ACCESS_KEY_ID present: {bool(aws_access_key)}")
-            print(f"AWS_SECRET_ACCESS_KEY present: {bool(aws_secret_key)}")
-            return None
-        
-        # Create S3 client with explicit credentials
+        # AWS Open Data buckets are publicly accessible without credentials
+        # Use anonymous access with correct region
         s3 = boto3.client('s3', 
                          region_name='us-east-1',
-                         aws_access_key_id=aws_access_key,
-                         aws_secret_access_key=aws_secret_key)
+                         config=Config(signature_version=UNSIGNED))
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -87,12 +77,11 @@ def get_latest_radar_file(site):
             
             print(f"Checking S3 for {site} at {check_time.strftime('%Y-%m-%d %H:%M')}...")
             
-            # List objects in the bucket (requester-pays)
+            # List objects in the bucket
             response = s3.list_objects_v2(
                 Bucket=BUCKET_NAME,
                 Prefix=prefix,
-                MaxKeys=100,
-                RequestPayer='requester'  # Required for requester-pays buckets
+                MaxKeys=100
             )
             
             if 'Contents' not in response:
@@ -116,24 +105,15 @@ def get_latest_radar_file(site):
 def download_radar_file(s3_key):
     """Download radar file from S3 to temp location"""
     try:
-        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-        
         s3 = boto3.client('s3', 
                          region_name='us-east-1',
-                         aws_access_key_id=aws_access_key,
-                         aws_secret_access_key=aws_secret_key)
+                         config=Config(signature_version=UNSIGNED))
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
         
         print(f"Downloading {s3_key}...")
-        s3.download_file(
-            BUCKET_NAME, 
-            s3_key, 
-            temp_file.name,
-            ExtraArgs={'RequestPayer': 'requester'}  # Required for requester-pays
-        )
+        s3.download_file(BUCKET_NAME, s3_key, temp_file.name)
         
         print(f"Downloaded to {temp_file.name}")
         return temp_file.name
