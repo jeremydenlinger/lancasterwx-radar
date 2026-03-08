@@ -20,7 +20,7 @@ from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
 
 # Configuration
-RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
+RADAR_SITES = ['KLWX']  # Just Sterling VA - covers Lancaster area
 OUTPUT_DIR = '/app/public'
 THREDDS_BASE = 'https://thredds.ucar.edu/thredds'
 LOOP_INTERVAL = 300  # 5 minutes
@@ -160,6 +160,11 @@ def process_radar_file(file_path, site):
         # Create GeoJSON features
         features = []
         
+        # Limit range to 150km (Lancaster is ~80km from KLWX)
+        # This dramatically reduces memory by skipping distant gates
+        max_range_km = 150
+        max_range_m = max_range_km * 1000
+        
         # Sample MUCH more aggressively to reduce memory usage
         # Free tier has only 512MB RAM - we need to be very conservative
         gate_step = 10  # Every 10th gate (~2.5km spacing)
@@ -169,6 +174,10 @@ def process_radar_file(file_path, site):
             azimuth = gate_azimuth[ray_idx]
             
             for gate_idx in range(0, len(gate_range), gate_step):
+                # Skip gates beyond 150km
+                if gate_range[gate_idx] > max_range_m:
+                    break
+                
                 # Get reflectivity value
                 dbz_value = reflectivity[ray_idx, gate_idx]
                 
