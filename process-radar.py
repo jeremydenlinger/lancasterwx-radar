@@ -12,9 +12,7 @@ import tempfile
 from datetime import datetime, timedelta
 import time
 import threading
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
+from google.cloud import storage
 import pyart
 import numpy as np
 from flask import Flask, send_from_directory, jsonify
@@ -22,8 +20,8 @@ from flask_cors import CORS
 
 # Configuration
 RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
-OUTPUT_DIR = '/app/public'  # Railway serves files from /app/public
-BUCKET_NAME = 'noaa-nexrad-level2'
+OUTPUT_DIR = '/app/public'
+BUCKET_NAME = 'gcp-public-data-nexrad-l2'
 LOOP_INTERVAL = 300  # 5 minutes
 
 # Reflectivity color scale (dBZ to color)
@@ -57,13 +55,11 @@ def get_color_from_dbz(dbz):
         return '#9900cc'  # Purple - very heavy
 
 def get_latest_radar_file(site):
-    """Get the most recent radar file from AWS S3 for a given site"""
+    """Get the most recent radar file from Google Cloud Storage for a given site"""
     try:
-        # AWS Open Data buckets are publicly accessible without credentials
-        # Use anonymous access with correct region
-        s3 = boto3.client('s3', 
-                         region_name='us-east-1',
-                         config=Config(signature_version=UNSIGNED))
+        # Create GCS client (public bucket, no auth needed)
+        client = storage.Client.create_anonymous_client()
+        bucket = client.bucket(BUCKET_NAME)
         
         # Get current UTC time
         now = datetime.utcnow()
@@ -72,28 +68,22 @@ def get_latest_radar_file(site):
         for minutes_ago in range(0, 30, 5):
             check_time = now - timedelta(minutes=minutes_ago)
             
-            # Build S3 prefix: YYYY/MM/DD/SITE/
+            # Build GCS prefix: YYYY/MM/DD/SITE/
             prefix = f"{check_time.strftime('%Y/%m/%d')}/{site}/"
             
-            print(f"Checking S3 for {site} at {check_time.strftime('%Y-%m-%d %H:%M')}...")
+            print(f"Checking GCS for {site} at {check_time.strftime('%Y-%m-%d %H:%M')}...")
             
             # List objects in the bucket
-            response = s3.list_objects_v2(
-                Bucket=BUCKET_NAME,
-                Prefix=prefix,
-                MaxKeys=100
-            )
+            blobs = list(bucket.list_blobs(prefix=prefix, max_results=100))
             
-            if 'Contents' not in response:
+            if not blobs:
                 continue
             
-            # Get the most recent file
-            files = sorted(response['Contents'], key=lambda x: x['LastModified'], reverse=True)
+            # Get the most recent file (blobs are sorted by name/time)
+            latest_blob = sorted(blobs, key=lambda b: b.name, reverse=True)[0]
             
-            if files:
-                latest_file = files[0]['Key']
-                print(f"Found latest file: {latest_file}")
-                return latest_file
+            print(f"Found latest file: {latest_blob.name}")
+            return latest_blob.name
         
         print(f"No recent radar files found for {site}")
         return None
@@ -102,18 +92,18 @@ def get_latest_radar_file(site):
         print(f"Error finding radar file for {site}: {e}")
         return None
 
-def download_radar_file(s3_key):
-    """Download radar file from S3 to temp location"""
+def download_radar_file(blob_name):
+    """Download radar file from GCS to temp location"""
     try:
-        s3 = boto3.client('s3', 
-                         region_name='us-east-1',
-                         config=Config(signature_version=UNSIGNED))
+        client = storage.Client.create_anonymous_client()
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(blob_name)
         
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
         
-        print(f"Downloading {s3_key}...")
-        s3.download_file(BUCKET_NAME, s3_key, temp_file.name)
+        print(f"Downloading {blob_name}...")
+        blob.download_to_filename(temp_file.name)
         
         print(f"Downloaded to {temp_file.name}")
         return temp_file.name
