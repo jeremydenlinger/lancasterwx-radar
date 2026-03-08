@@ -1,7 +1,7 @@
 #!/usr/bin/env python3 -u
 """
-NEXRAD Level 2 Radar Processor for LancasterWX.com
-Uses NOAA THREDDS Data Server for real-time Level 2 data
+NEXRAD Level 3 Radar Processor for LancasterWX.com
+Uses Iowa Environmental Mesonet for pre-processed radar composites
 Outputs GeoJSON to public directory for web access
 """
 
@@ -13,20 +13,23 @@ from datetime import datetime, timedelta
 import time
 import threading
 import requests
-from xml.etree import ElementTree
-import pyart
+from PIL import Image
 import numpy as np
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
 
 # Configuration
-RADAR_SITES = ['KLWX']  # Just Sterling VA - covers Lancaster area
+RADAR_SITES = ['KLWX']  # Sterling VA - covers Lancaster area
 OUTPUT_DIR = '/app/public'
-THREDDS_BASE = 'https://thredds.ucar.edu/thredds'
+IEM_BASE = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913'
 LOOP_INTERVAL = 300  # 5 minutes
-PROCESS_ONE_AT_A_TIME = True  # Process sites sequentially to save memory
 
-# Reflectivity color scale (dBZ to color)
+# Map bounds for Lancaster area (will fetch tiles covering this region)
+LANCASTER_LAT = 40.0379
+LANCASTER_LON = -76.3055
+TILE_RADIUS = 2  # Fetch tiles in 2-tile radius around Lancaster
+
+# Reflectivity color scale (dBZ to color) - matching Level 2 colors
 def get_color_from_dbz(dbz):
     """Convert radar reflectivity (dBZ) to hex color"""
     if dbz < 5:
@@ -56,197 +59,203 @@ def get_color_from_dbz(dbz):
     else:
         return '#9900cc'  # Purple - very heavy
 
-def get_latest_radar_file(site):
-    """Get the most recent radar file from THREDDS for a given site"""
+def latlon_to_tile(lat, lon, zoom):
+    """Convert lat/lon to tile coordinates at given zoom level"""
+    lat_rad = np.radians(lat)
+    n = 2.0 ** zoom
+    xtile = int((lon + 180.0) / 360.0 * n)
+    ytile = int((1.0 - np.log(np.tan(lat_rad) + (1 / np.cos(lat_rad))) / np.pi) / 2.0 * n)
+    return (xtile, ytile)
+
+def tile_to_latlon(xtile, ytile, zoom):
+    """Convert tile coordinates to lat/lon (NW corner)"""
+    n = 2.0 ** zoom
+    lon_deg = xtile / n * 360.0 - 180.0
+    lat_rad = np.arctan(np.sinh(np.pi * (1 - 2 * ytile / n)))
+    lat_deg = np.degrees(lat_rad)
+    return (lat_deg, lon_deg)
+
+def download_radar_tile(zoom, x, y):
+    """Download a single radar tile from Iowa State Mesonet"""
     try:
-        # Get current UTC time
-        now = datetime.utcnow()
+        # Iowa State Mesonet tile URL
+        url = f"{IEM_BASE}/{zoom}/{x}/{y}.png"
         
-        # Try the last 2 hours (THREDDS organizes by date/time)
-        for hours_ago in range(0, 3):
-            check_time = now - timedelta(hours=hours_ago)
-            date_str = check_time.strftime('%Y%m%d')
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            # Save to temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+            temp_file.write(response.content)
+            temp_file.close()
+            return temp_file.name
+        else:
+            return None
             
-            # Build THREDDS catalog URL
-            catalog_url = f"{THREDDS_BASE}/catalog/nexrad/level2/{site}/{date_str}/catalog.xml"
-            
-            print(f"Checking THREDDS for {site} on {date_str}...")
-            
-            try:
-                response = requests.get(catalog_url, timeout=10)
-                if response.status_code != 200:
-                    continue
-                
-                # Parse XML catalog
-                root = ElementTree.fromstring(response.content)
-                
-                # Find all dataset entries
-                ns = {'cat': 'http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0'}
-                datasets = root.findall('.//cat:dataset[@urlPath]', ns)
-                
-                if not datasets:
-                    continue
-                
-                # Get the most recent file (last in list)
-                latest = datasets[-1]
-                url_path = latest.get('urlPath')
-                
-                if url_path:
-                    # Build download URL
-                    download_url = f"{THREDDS_BASE}/fileServer/{url_path}"
-                    print(f"Found latest file: {url_path}")
-                    return download_url
-                    
-            except Exception as e:
-                print(f"Error checking {date_str}: {e}")
-                continue
-        
-        print(f"No recent radar files found for {site}")
-        return None
-        
     except Exception as e:
-        print(f"Error finding radar file for {site}: {e}")
+        print(f"Error downloading tile {zoom}/{x}/{y}: {e}")
         return None
 
-def download_radar_file(download_url):
-    """Download radar file from THREDDS to temp location"""
-    try:
-        # Create temp file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
-        
-        print(f"Downloading from THREDDS...")
-        
-        # Stream download to handle large files
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
-        
-        with open(temp_file.name, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        print(f"Downloaded to {temp_file.name}")
-        return temp_file.name
-        
-    except Exception as e:
-        print(f"Error downloading radar file: {e}")
+def rgb_to_dbz(r, g, b, a):
+    """Convert Iowa State Mesonet color to approximate dBZ value"""
+    # If transparent, no data
+    if a < 128:
         return None
+    
+    # Iowa State Mesonet uses standard NWS color scale
+    # Approximate dBZ based on color
+    if r < 50 and g > 200 and b > 200:
+        return 10  # Light blue
+    elif r < 50 and g > 150 and b > 200:
+        return 15  # Blue
+    elif r < 50 and g > 100 and b > 150:
+        return 20  # Dark blue
+    elif r < 100 and g > 200 and b < 100:
+        return 25  # Green
+    elif r < 100 and g > 150 and b < 50:
+        return 30  # Dark green
+    elif r > 200 and g > 200 and b < 100:
+        return 35  # Yellow
+    elif r > 200 and g > 150 and b < 100:
+        return 40  # Orange
+    elif r > 200 and g > 100 and b < 50:
+        return 45  # Dark orange
+    elif r > 200 and g < 100 and b < 50:
+        return 50  # Red
+    elif r > 150 and g < 50 and b < 50:
+        return 55  # Dark red
+    elif r > 200 and g < 100 and b > 200:
+        return 60  # Magenta
+    elif r > 100 and g < 50 and b > 150:
+        return 65  # Purple
+    else:
+        return 20  # Default
 
-def process_radar_file(file_path, site):
-    """Process radar file with Py-ART and create GeoJSON"""
+def process_radar_composite():
+    """Download and process radar tiles into GeoJSON"""
     try:
-        print(f"Processing {site} radar data...")
+        print("Processing radar composite...")
         
-        # Read the radar file
-        radar = pyart.io.read_nexrad_archive(file_path)
+        # Use zoom level 8 for good detail without too much data
+        zoom = 8
         
-        # Get the first sweep (lowest elevation angle - best for precipitation)
-        sweep = 0
+        # Get center tile for Lancaster
+        center_x, center_y = latlon_to_tile(LANCASTER_LAT, LANCASTER_LON, zoom)
         
-        # Extract reflectivity data
-        reflectivity = radar.get_field(sweep, 'reflectivity')
+        print(f"Center tile: {zoom}/{center_x}/{center_y}")
         
-        # Get gate coordinates (range and azimuth)
-        gate_range = radar.range['data']
-        gate_azimuth = radar.azimuth['data'][radar.sweep_start_ray_index['data'][sweep]:
-                                             radar.sweep_end_ray_index['data'][sweep] + 1]
+        # Download tiles in a grid around Lancaster
+        tiles = []
+        for dy in range(-TILE_RADIUS, TILE_RADIUS + 1):
+            for dx in range(-TILE_RADIUS, TILE_RADIUS + 1):
+                tile_x = center_x + dx
+                tile_y = center_y + dy
+                
+                tile_file = download_radar_tile(zoom, tile_x, tile_y)
+                if tile_file:
+                    tiles.append({
+                        'file': tile_file,
+                        'x': tile_x,
+                        'y': tile_y,
+                        'zoom': zoom
+                    })
         
-        # Radar location
-        radar_lat = radar.latitude['data'][0]
-        radar_lon = radar.longitude['data'][0]
+        if not tiles:
+            print("No radar tiles downloaded")
+            return None
         
-        print(f"Radar location: {radar_lat}, {radar_lon}")
-        print(f"Reflectivity shape: {reflectivity.shape}")
+        print(f"Downloaded {len(tiles)} tiles")
         
-        # Create GeoJSON features
+        # Process tiles into GeoJSON features
         features = []
         
-        # Limit range to 150km (Lancaster is ~80km from KLWX)
-        # This dramatically reduces memory by skipping distant gates
-        max_range_km = 150
-        max_range_m = max_range_km * 1000
+        for tile in tiles:
+            try:
+                # Load tile image
+                img = Image.open(tile['file'])
+                img_array = np.array(img)
+                
+                # Tile covers lat/lon bounds
+                lat_nw, lon_nw = tile_to_latlon(tile['x'], tile['y'], zoom)
+                lat_se, lon_se = tile_to_latlon(tile['x'] + 1, tile['y'] + 1, zoom)
+                
+                # Sample every Nth pixel to reduce data size
+                step = 8  # Sample every 8th pixel
+                
+                height, width = img_array.shape[:2]
+                
+                for y in range(0, height, step):
+                    for x in range(0, width, step):
+                        # Get pixel color
+                        if img_array.ndim == 3:
+                            r, g, b = img_array[y, x, :3]
+                            a = img_array[y, x, 3] if img_array.shape[2] == 4 else 255
+                        else:
+                            continue
+                        
+                        # Convert color to dBZ
+                        dbz = rgb_to_dbz(r, g, b, a)
+                        
+                        if dbz is None or dbz < 5:
+                            continue
+                        
+                        # Calculate lat/lon for this pixel
+                        pixel_lon = lon_nw + (x / width) * (lon_se - lon_nw)
+                        pixel_lat = lat_nw + (y / height) * (lat_se - lat_nw)
+                        
+                        # Get color for this reflectivity value
+                        color = get_color_from_dbz(dbz)
+                        
+                        if color:
+                            feature = {
+                                "type": "Feature",
+                                "properties": {
+                                    "dbz": dbz,
+                                    "color": color
+                                },
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [pixel_lon, pixel_lat]
+                                }
+                            }
+                            features.append(feature)
+                
+                # Clean up tile file
+                os.unlink(tile['file'])
+                
+            except Exception as e:
+                print(f"Error processing tile: {e}")
+                continue
         
-        # Sample MUCH more aggressively to reduce memory usage
-        # Free tier has only 512MB RAM - we need to be very conservative
-        gate_step = 10  # Every 10th gate (~2.5km spacing)
-        ray_step = 4    # Every 4th ray (~2 degree spacing)
-        
-        for ray_idx in range(0, len(gate_azimuth), ray_step):
-            azimuth = gate_azimuth[ray_idx]
-            
-            for gate_idx in range(0, len(gate_range), gate_step):
-                # Skip gates beyond 150km
-                if gate_range[gate_idx] > max_range_m:
-                    break
-                
-                # Get reflectivity value
-                dbz_value = reflectivity[ray_idx, gate_idx]
-                
-                # Skip masked/invalid values
-                if np.ma.is_masked(dbz_value) or dbz_value < 5:
-                    continue
-                
-                # Calculate lat/lon for this gate
-                range_km = gate_range[gate_idx] / 1000.0
-                
-                # Simple projection (good enough for <230km range)
-                lat_offset = range_km * np.cos(np.radians(azimuth)) / 111.0
-                lon_offset = range_km * np.sin(np.radians(azimuth)) / (111.0 * np.cos(np.radians(radar_lat)))
-                
-                gate_lat = radar_lat + lat_offset
-                gate_lon = radar_lon + lon_offset
-                
-                # Get color for this reflectivity value
-                color = get_color_from_dbz(dbz_value)
-                
-                if color:
-                    feature = {
-                        "type": "Feature",
-                        "properties": {
-                            "dbz": float(dbz_value),
-                            "color": color
-                        },
-                        "geometry": {
-                            "type": "Point",
-                            "coordinates": [gate_lon, gate_lat]
-                        }
-                    }
-                    features.append(feature)
-        
-        print(f"Created {len(features)} features for {site}")
+        print(f"Created {len(features)} features")
         
         # Create GeoJSON
         geojson = {
             "type": "FeatureCollection",
             "properties": {
-                "site": site,
+                "source": "Iowa Environmental Mesonet",
+                "product": "NEXRAD Base Reflectivity",
                 "timestamp": datetime.utcnow().isoformat() + 'Z',
-                "radar_lat": float(radar_lat),
-                "radar_lon": float(radar_lon)
+                "center_lat": LANCASTER_LAT,
+                "center_lon": LANCASTER_LON
             },
             "features": features
         }
         
-        # Clean up radar object to free memory
-        del radar
-        del reflectivity
-        import gc
-        gc.collect()
-        
         return geojson
         
     except Exception as e:
-        print(f"Error processing radar file: {e}")
+        print(f"Error processing radar composite: {e}")
         import traceback
         traceback.print_exc()
         return None
 
-def save_geojson(geojson, site):
+def save_geojson(geojson, filename='radar-composite.geojson'):
     """Save GeoJSON to output directory"""
     try:
         # Create output directory if it doesn't exist
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        output_file = os.path.join(OUTPUT_DIR, f'radar-{site.lower()}.geojson')
+        output_file = os.path.join(OUTPUT_DIR, filename)
         
         with open(output_file, 'w') as f:
             json.dump(geojson, f)
@@ -257,19 +266,11 @@ def save_geojson(geojson, site):
         status_file = os.path.join(OUTPUT_DIR, 'status.json')
         status = {
             'last_updated': datetime.utcnow().isoformat() + 'Z',
-            'sites': {}
+            'source': 'Iowa Environmental Mesonet',
+            'product': 'NEXRAD Level 3 Composite',
+            'features': len(geojson['features']),
+            'files': [f'/{filename}', '/status.json']
         }
-        
-        # Load existing status if it exists
-        if os.path.exists(status_file):
-            with open(status_file, 'r') as f:
-                status = json.load(f)
-        
-        status['sites'][site] = {
-            'timestamp': geojson['properties']['timestamp'],
-            'features': len(geojson['features'])
-        }
-        status['last_updated'] = datetime.utcnow().isoformat() + 'Z'
         
         with open(status_file, 'w') as f:
             json.dump(status, f, indent=2)
@@ -280,55 +281,28 @@ def save_geojson(geojson, site):
         print(f"Error saving GeoJSON: {e}")
         return False
 
-def process_all_radars():
-    """Process all radar sites"""
+def process_radar():
+    """Main radar processing function"""
     print(f"=== NEXRAD Radar Processing Started at {datetime.utcnow().isoformat()}Z ===")
     
-    for site in RADAR_SITES:
-        print(f"\n--- Processing {site} ---")
-        
-        # Find latest radar file
-        download_url = get_latest_radar_file(site)
-        if not download_url:
-            print(f"Skipping {site} - no recent data found")
-            continue
-        
-        # Download the file
-        local_file = download_radar_file(download_url)
-        if not local_file:
-            print(f"Skipping {site} - download failed")
-            continue
-        
-        # Process the radar data
-        geojson = process_radar_file(local_file, site)
-        
-        # Clean up downloaded file immediately
-        try:
-            os.unlink(local_file)
-        except:
-            pass
-        
-        if geojson:
-            # Save the GeoJSON
-            save_geojson(geojson, site)
-            # Clear the geojson from memory
-            del geojson
-        else:
-            print(f"Failed to process {site}")
-        
-        # Force garbage collection between sites to free memory
-        import gc
-        gc.collect()
+    # Process radar composite
+    geojson = process_radar_composite()
     
-    print(f"\n=== Processing Complete ===")
+    if geojson:
+        # Save the GeoJSON
+        save_geojson(geojson)
+    else:
+        print("Failed to process radar data")
+    
+    print(f"=== Processing Complete ===")
 
 def main():
     """Main function - starts Flask server and radar processing thread"""
-    print("NEXRAD Radar Processor Starting...")
+    print("NEXRAD Level 3 Radar Processor Starting...")
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Processing interval: {LOOP_INTERVAL} seconds")
-    print(f"Radar sites: {', '.join(RADAR_SITES)}")
-    print(f"Data source: NOAA THREDDS Server")
+    print(f"Data source: Iowa Environmental Mesonet")
+    print(f"Center: Lancaster, PA ({LANCASTER_LAT}, {LANCASTER_LON})")
     
     # Create Flask app
     app = Flask(__name__)
@@ -344,19 +318,12 @@ def main():
             return jsonify({
                 'service': 'LancasterWX Radar Processor',
                 'status': 'running',
-                'source': 'NOAA THREDDS',
-                'last_updated': status.get('last_updated'),
-                'sites': status.get('sites'),
-                'files': [
-                    '/radar-klwx.geojson',
-                    '/radar-kdix.geojson',
-                    '/status.json'
-                ]
+                **status
             })
         return jsonify({
             'service': 'LancasterWX Radar Processor',
             'status': 'starting',
-            'source': 'NOAA THREDDS',
+            'source': 'Iowa Environmental Mesonet',
             'message': 'Waiting for first radar update...'
         })
     
@@ -376,7 +343,7 @@ def main():
         """Background thread for radar processing"""
         while True:
             try:
-                process_all_radars()
+                process_radar()
             except Exception as e:
                 print(f"Error in processing loop: {e}")
                 import traceback
