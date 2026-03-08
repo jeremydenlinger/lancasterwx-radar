@@ -20,7 +20,7 @@ from flask_cors import CORS
 
 # Configuration
 RADAR_SITES = ['KLWX']  # Sterling VA - covers Lancaster area
-OUTPUT_DIR = '/app/public'
+OUTPUT_DIR = '/tmp/radar-output'  # Use /tmp which is always writable
 IEM_BASE = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913'
 LOOP_INTERVAL = 300  # 5 minutes
 
