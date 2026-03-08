@@ -1,7 +1,7 @@
 #!/usr/bin/env python3 -u
 """
 NEXRAD Level 2 Radar Processor for LancasterWX.com
-Runs on Railway.app - Downloads and processes radar data from KLWX and KDIX
+Uses NOAA THREDDS Data Server for real-time Level 2 data
 Outputs GeoJSON to public directory for web access
 """
 
@@ -12,7 +12,8 @@ import tempfile
 from datetime import datetime, timedelta
 import time
 import threading
-from google.cloud import storage
+import requests
+from xml.etree import ElementTree
 import pyart
 import numpy as np
 from flask import Flask, send_from_directory, jsonify
@@ -21,7 +22,7 @@ from flask_cors import CORS
 # Configuration
 RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
 OUTPUT_DIR = '/app/public'
-BUCKET_NAME = 'gcp-public-data-nexrad-l2'
+THREDDS_BASE = 'https://thredds.ucar.edu/thredds'
 LOOP_INTERVAL = 300  # 5 minutes
 
 # Reflectivity color scale (dBZ to color)
@@ -55,35 +56,49 @@ def get_color_from_dbz(dbz):
         return '#9900cc'  # Purple - very heavy
 
 def get_latest_radar_file(site):
-    """Get the most recent radar file from Google Cloud Storage for a given site"""
+    """Get the most recent radar file from THREDDS for a given site"""
     try:
-        # Create GCS client (public bucket, no auth needed)
-        client = storage.Client.create_anonymous_client()
-        bucket = client.bucket(BUCKET_NAME)
-        
         # Get current UTC time
         now = datetime.utcnow()
         
-        # Try the last 30 minutes (radar updates every ~5 minutes)
-        for minutes_ago in range(0, 30, 5):
-            check_time = now - timedelta(minutes=minutes_ago)
+        # Try the last 2 hours (THREDDS organizes by date/time)
+        for hours_ago in range(0, 3):
+            check_time = now - timedelta(hours=hours_ago)
+            date_str = check_time.strftime('%Y%m%d')
             
-            # Build GCS prefix: YYYY/MM/DD/SITE/
-            prefix = f"{check_time.strftime('%Y/%m/%d')}/{site}/"
+            # Build THREDDS catalog URL
+            catalog_url = f"{THREDDS_BASE}/catalog/nexrad/level2/{site}/{date_str}/catalog.xml"
             
-            print(f"Checking GCS for {site} at {check_time.strftime('%Y-%m-%d %H:%M')}...")
+            print(f"Checking THREDDS for {site} on {date_str}...")
             
-            # List objects in the bucket
-            blobs = list(bucket.list_blobs(prefix=prefix, max_results=100))
-            
-            if not blobs:
+            try:
+                response = requests.get(catalog_url, timeout=10)
+                if response.status_code != 200:
+                    continue
+                
+                # Parse XML catalog
+                root = ElementTree.fromstring(response.content)
+                
+                # Find all dataset entries
+                ns = {'cat': 'http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0'}
+                datasets = root.findall('.//cat:dataset[@urlPath]', ns)
+                
+                if not datasets:
+                    continue
+                
+                # Get the most recent file (last in list)
+                latest = datasets[-1]
+                url_path = latest.get('urlPath')
+                
+                if url_path:
+                    # Build download URL
+                    download_url = f"{THREDDS_BASE}/fileServer/{url_path}"
+                    print(f"Found latest file: {url_path}")
+                    return download_url
+                    
+            except Exception as e:
+                print(f"Error checking {date_str}: {e}")
                 continue
-            
-            # Get the most recent file (blobs are sorted by name/time)
-            latest_blob = sorted(blobs, key=lambda b: b.name, reverse=True)[0]
-            
-            print(f"Found latest file: {latest_blob.name}")
-            return latest_blob.name
         
         print(f"No recent radar files found for {site}")
         return None
@@ -92,18 +107,21 @@ def get_latest_radar_file(site):
         print(f"Error finding radar file for {site}: {e}")
         return None
 
-def download_radar_file(blob_name):
-    """Download radar file from GCS to temp location"""
+def download_radar_file(download_url):
+    """Download radar file from THREDDS to temp location"""
     try:
-        client = storage.Client.create_anonymous_client()
-        bucket = client.bucket(BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        
         # Create temp file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ar2v')
         
-        print(f"Downloading {blob_name}...")
-        blob.download_to_filename(temp_file.name)
+        print(f"Downloading from THREDDS...")
+        
+        # Stream download to handle large files
+        response = requests.get(download_url, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        with open(temp_file.name, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
         
         print(f"Downloaded to {temp_file.name}")
         return temp_file.name
@@ -253,13 +271,13 @@ def process_all_radars():
         print(f"\n--- Processing {site} ---")
         
         # Find latest radar file
-        s3_key = get_latest_radar_file(site)
-        if not s3_key:
+        download_url = get_latest_radar_file(site)
+        if not download_url:
             print(f"Skipping {site} - no recent data found")
             continue
         
         # Download the file
-        local_file = download_radar_file(s3_key)
+        local_file = download_radar_file(download_url)
         if not local_file:
             print(f"Skipping {site} - download failed")
             continue
@@ -287,6 +305,7 @@ def main():
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Processing interval: {LOOP_INTERVAL} seconds")
     print(f"Radar sites: {', '.join(RADAR_SITES)}")
+    print(f"Data source: NOAA THREDDS Server")
     
     # Create Flask app
     app = Flask(__name__)
@@ -302,6 +321,7 @@ def main():
             return jsonify({
                 'service': 'LancasterWX Radar Processor',
                 'status': 'running',
+                'source': 'NOAA THREDDS',
                 'last_updated': status.get('last_updated'),
                 'sites': status.get('sites'),
                 'files': [
@@ -313,6 +333,7 @@ def main():
         return jsonify({
             'service': 'LancasterWX Radar Processor',
             'status': 'starting',
+            'source': 'NOAA THREDDS',
             'message': 'Waiting for first radar update...'
         })
     
@@ -344,11 +365,11 @@ def main():
     # Start background thread
     radar_thread = threading.Thread(target=radar_loop, daemon=True)
     radar_thread.start()
-    print("Radar processing thread started", flush=True)
+    print("Radar processing thread started")
     
-    # Get port from environment (Railway sets this)
+    # Get port from environment (Render sets this)
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting web server on port {port}...", flush=True)
+    print(f"Starting web server on port {port}...")
     
     # Run Flask app
     app.run(host='0.0.0.0', port=port)
