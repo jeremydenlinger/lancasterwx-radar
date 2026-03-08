@@ -24,6 +24,7 @@ RADAR_SITES = ['KLWX', 'KDIX']  # Sterling VA, Mt Holly NJ
 OUTPUT_DIR = '/app/public'
 THREDDS_BASE = 'https://thredds.ucar.edu/thredds'
 LOOP_INTERVAL = 300  # 5 minutes
+PROCESS_ONE_AT_A_TIME = True  # Process sites sequentially to save memory
 
 # Reflectivity color scale (dBZ to color)
 def get_color_from_dbz(dbz):
@@ -159,9 +160,10 @@ def process_radar_file(file_path, site):
         # Create GeoJSON features
         features = []
         
-        # Sample every Nth gate and ray to reduce data size
-        gate_step = 5  # Every 5th gate (~1.25km spacing)
-        ray_step = 2   # Every 2nd ray (~1 degree spacing)
+        # Sample MUCH more aggressively to reduce memory usage
+        # Free tier has only 512MB RAM - we need to be very conservative
+        gate_step = 10  # Every 10th gate (~2.5km spacing)
+        ray_step = 4    # Every 4th ray (~2 degree spacing)
         
         for ray_idx in range(0, len(gate_azimuth), ray_step):
             azimuth = gate_azimuth[ray_idx]
@@ -214,6 +216,12 @@ def process_radar_file(file_path, site):
             },
             "features": features
         }
+        
+        # Clean up radar object to free memory
+        del radar
+        del reflectivity
+        import gc
+        gc.collect()
         
         return geojson
         
@@ -285,7 +293,7 @@ def process_all_radars():
         # Process the radar data
         geojson = process_radar_file(local_file, site)
         
-        # Clean up downloaded file
+        # Clean up downloaded file immediately
         try:
             os.unlink(local_file)
         except:
@@ -294,8 +302,14 @@ def process_all_radars():
         if geojson:
             # Save the GeoJSON
             save_geojson(geojson, site)
+            # Clear the geojson from memory
+            del geojson
         else:
             print(f"Failed to process {site}")
+        
+        # Force garbage collection between sites to free memory
+        import gc
+        gc.collect()
     
     print(f"\n=== Processing Complete ===")
 
